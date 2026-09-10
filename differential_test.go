@@ -3,7 +3,7 @@ package totp_test
 import (
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -100,7 +100,14 @@ for c in cases:
 json.dump(cases, sys.stdout)
 `
 
-// needPyOTP finds a python that has pyotp, or skips.
+// needPyOTP finds a python that has pyotp, or skips -- unless the environment
+// says the judge must be there.
+//
+// ⛔ A skip in the lane that INSTALLS the judge is a lane that passes for the
+// wrong reason, and it looks exactly like a lane that passed for the right
+// one. The first run of this test in CI took 0.082s, which is not long enough
+// to have started a Python: it had skipped, and nothing said so. So the lane
+// sets TOTP_REQUIRE_JUDGE=1 and a missing pyotp fails there.
 func needPyOTP(t *testing.T) string {
 	t.Helper()
 	for _, python := range []string{"python3", "python"} {
@@ -112,8 +119,9 @@ func needPyOTP(t *testing.T) string {
 			return p
 		}
 	}
+	if os.Getenv("TOTP_REQUIRE_JUDGE") != "" {
+		t.Fatal("TOTP_REQUIRE_JUDGE is set and there is no python with pyotp: the independent implementation is the judge, and this lane exists to run it")
+	}
 	t.Skip("no python with pyotp here: the independent implementation is the judge, and the CI lane installs it")
 	return ""
 }
-
-var _ = fmt.Sprint
