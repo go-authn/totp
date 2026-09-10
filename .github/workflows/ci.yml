@@ -65,7 +65,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with: { go-version: stable, check-latest: true, cache: true }
+      # ⛔ The judge belongs in every lane that RUNS the tests, not only the
+      # one named "test": without it the differential test skips, and a skip
+      # is not a failure. TOTP_REQUIRE_JUDGE turns that skip into a failure
+      # wherever the judge is supposed to be there.
+      - name: pyotp
+        run: pip install --break-system-packages pyotp || pipx install pyotp
       - run: go test -race -count=1 ./...
+        env:
+          TOTP_REQUIRE_JUDGE: "1"
 
   coverage:
     name: coverage (the standard is 100%)
@@ -74,7 +82,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with: { go-version: stable, check-latest: true, cache: true }
+      # ⛔ The judge belongs in every lane that RUNS the tests, not only the
+      # one named "test": without it the differential test skips, and a skip
+      # is not a failure. TOTP_REQUIRE_JUDGE turns that skip into a failure
+      # wherever the judge is supposed to be there.
+      - name: pyotp
+        run: pip install --break-system-packages pyotp || pipx install pyotp
       - run: |
+          export TOTP_REQUIRE_JUDGE=1
           FLOOR=95.0
           go test -coverprofile=cover.out -coverpkg=./... ./... >/dev/null
           go tool cover -func=cover.out
