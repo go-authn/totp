@@ -35,7 +35,12 @@ jobs:
       # before this package is asked anything.
       - name: pyotp
         if: matrix.os == 'ubuntu-latest'
-        run: pipx install pyotp || pip install --break-system-packages pyotp
+        run: pip install --break-system-packages pyotp || pipx install pyotp
+      # And the judge must actually be reachable in this lane: a skip here
+      # looks exactly like a pass.
+      - name: the judge is there
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -c "import pyotp; print(pyotp.__name__, 'is importable')"
       - run: go vet ./...
       - name: gofmt
         if: matrix.os == 'ubuntu-latest'
@@ -46,6 +51,10 @@ jobs:
             echo "::error::these files are not gofmt-clean:"; echo "$unformatted"; exit 1
           fi
       - run: go test -count=1 ./...
+        env:
+          # Ubuntu installs pyotp above, so a skipped differential test there
+          # is a lane passing for the wrong reason.
+          TOTP_REQUIRE_JUDGE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
 
   race:
     name: race detector
