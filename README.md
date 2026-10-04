@@ -10,11 +10,18 @@ Pure Go, `CGO_ENABLED=0`, no dependencies but [go-authn/mfa](https://github.com/
 ```go
 secret, _ := totp.ParseSecret("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
 
+// knows is yours: whatever checks the password, as an mfa.Factor whose Kind is
+// mfa.Knowledge. This module provides the other half.
 r, err := mfa.Verify(ctx, mfa.Policy{Count: 2, DistinctKinds: true},
-    password.Factor(given),                        // something they know
+    knows,                                         // something they know
     totp.Factor("dora", secret, code, verifier),   // something they have
 )
 ```
+
+Codes are six digits, every 30 seconds, HMAC-SHA1, one step either side,
+unless `Options` says otherwise: `Digits`, `Period`, `Algorithm` (`SHA1`,
+`SHA256`, `SHA512`) and `Window` (`NoWindow` for none: 0 means the default). A `Verifier` carries its own `Options`, and
+`FormatSecret` writes a secret the way `ParseSecret` reads it.
 
 The six digits on a phone are HOTP (RFC 4226) with the counter replaced by the
 current half-minute. That is the whole idea; everything below is consequence.
