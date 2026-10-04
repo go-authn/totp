@@ -431,3 +431,23 @@ func TestIdleNamesAreForgotten(t *testing.T) {
 		t.Errorf("the locked name, a day later, gave %v", err)
 	}
 }
+
+// An accepted code starts the count again: wrong codes on either side of a
+// success are not consecutive, and are not added up.
+func TestASuccessStartsTheCountAgain(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	c := &clock{now: time.Unix(1111111109, 0)}
+	v := &totp.Verifier{Options: totp.Options{Now: c.Now}, Throttle: 3, Lockout: 5}
+	for round := range 4 {
+		for i := range 2 {
+			if err := v.Verify("dora", secret, wrongAt(t, secret, c.Now())); !errors.Is(err, totp.ErrWrongCode) {
+				t.Fatalf("round %d, wrong code #%d gave %v", round, i+1, err)
+			}
+		}
+		right, _ := totp.At(secret, c.Now(), v.Options)
+		if err := v.Verify("dora", secret, []byte(right)); err != nil {
+			t.Fatalf("round %d, the right code gave %v", round, err)
+		}
+		c.Add(30 * time.Second)
+	}
+}
