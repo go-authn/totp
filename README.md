@@ -8,7 +8,7 @@
 Pure Go, `CGO_ENABLED=0`, no dependencies but [go-authn/mfa](https://github.com/go-authn/mfa).
 
 ```go
-secret, _ := totp.ParseSecret("JBSWY3DPEHPK3PXP")
+secret, _ := totp.ParseSecret("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
 
 r, err := mfa.Verify(ctx, mfa.Policy{Count: 2, DistinctKinds: true},
     password.Factor(given),                        // something they know
@@ -50,6 +50,52 @@ was. The comparison itself is constant-time — a six-digit code has a million
 values, and a server that leaks how many leading digits were right has far
 fewer.
 
+## Guessing is limited per name
+
+A six-digit code has a million values; without a limit, trying them in order
+against one name got in after 292,211 guesses in 372 ms in an audit run.
+RFC 4226 §7.3 says the server needs to detect and stop that, and that the
+limit **MUST** hold across sessions and against parallel guessing. NIST SP
+800-63B §5.2.2 says a verifier **SHALL** limit consecutive failed attempts on
+one account to no more than 100. A `Verifier` does both:
+
+| field | default | what it does |
+| --- | --- | --- |
+| `Throttle` | `DefaultThrottle` = 5 | after this many wrong codes in a row, the name gets `ErrThrottled`… |
+| `Pause` | `DefaultPause` = 15 min | …for this long; the code sent meanwhile is not looked at, so not even the right one passes |
+| `Lockout` | `DefaultLockout` = 100 | after this many wrong codes in a row, however spread out, the name gets `ErrLockedOut` until `Forget` |
+
+RFC 4226 asks for a throttle "as low as possible, while still ensuring that
+usability is not significantly impacted" and names no number; five is more
+mistypes in a row than a person makes. The lockout is NIST's ceiling. With the
+defaults a guesser gets 100 tries in about five hours and then none — with the
+default window of three steps, a chance of 3 in 10,000 against six digits.
+`errors.Is(err, totp.ErrThrottled)` is true for both refusals, so a caller that
+checks only that refuses both.
+
+Only a wrong code counts. A replay (`ErrUsed`), a code of the wrong length and
+a refused secret or parameter are refused for their own reasons and do not
+bring a pause nearer. An accepted code starts the count again. The whole check
+is made under one lock, so guesses sent at the same moment are counted one by
+one rather than each finding the count below the limit.
+
+The memory is bounded: a name nobody has tried for a day is forgotten when the
+map has doubled since it was last swept. A locked-out name is never forgotten
+that way — that would be an unlock nobody asked for. And the limit is a lockout
+someone else can trigger: whoever knows a name can lock it. That is the
+trade-off both documents accept; `Forget` is the way back, and it belongs to
+whoever can tell the person from somebody guessing.
+
+## Parameters that cannot be right are refused
+
+- **The secret is at least 128 bits** (`MinSecret` = 16 bytes), RFC 4226 R6, in
+  `Generate`, `At`, `Verify` and `Verifier.Verify`. `ParseSecret` still reads a
+  shorter one — it is a parser — and nothing will make a code from it.
+- **The period is a whole number of seconds**, at least one: RFC 6238 counts it
+  in seconds, and half a second used to divide by zero.
+- **6 to 10 digits**, RFC 4226 §5.3, with the reduction done in 64 bits: 10^10
+  does not fit in 32.
+
 ## The secret is the credential
 
 Anybody holding it produces every future code. It is not a hash of anything, it
@@ -68,9 +114,13 @@ by construction and is shown to the person enrolling and to nobody else.
   the RFC's table is famously ambiguous about that, so the reading was
   **measured**: an independent implementation produces the RFC's published
   codes from it.
-- **200 random cases against pyotp** — secrets of 23 different lengths, 6 to 9
-  digits, four periods, all three algorithms. The published vectors pin the
-  arithmetic and leave the edges alone.
+- **RFC 4226 Appendix D**, counters 0 to 9: the six-digit codes, and the
+  "truncated" column, which is the ten-digit code because 2^31 < 10^10.
+- **200 random cases against pyotp** — secrets of 23 different lengths from
+  16 bytes, 6 to 10 digits, four periods, all three algorithms. The published
+  vectors pin the arithmetic and leave the edges alone.
+- **Every digit count, 1000 steps per algorithm**, against RFC 4226 §5.3
+  computed again in the test with the reduction in arbitrary precision.
 - Both judges were **sabotage-checked**: masking `0xffffffff` instead of
   `0x7fffffff` in the dynamic truncation fails 95 of 206 assertions, and
   reading the offset from the first byte instead of the last fails 196.
