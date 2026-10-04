@@ -18,9 +18,17 @@ r, err := mfa.Verify(ctx, mfa.Policy{Count: 2, DistinctKinds: true},
 )
 ```
 
+The `*Verifier` is **required**. `Factor` with a nil one used to fall back to
+the stateless `Verify` — no replay refusal, no throttle, no lockout: an audit
+found the code after 236,089 wrong guesses in a quarter of a second, then
+replayed it three times. Now the factor refuses every code, saying a Verifier
+is missing; it is not reported as unavailable, so a policy cannot pass on the
+other factors and hide the mistake.
+
 Codes are six digits, every 30 seconds, HMAC-SHA1, one step either side,
 unless `Options` says otherwise: `Digits`, `Period`, `Algorithm` (`SHA1`,
-`SHA256`, `SHA512`) and `Window` (`NoWindow` for none: 0 means the default). A `Verifier` carries its own `Options`, and
+`SHA256`, `SHA512`) and `Window` (`NoWindow` for none: 0 means the default,
+at most `MaxWindow` = 10). A `Verifier` carries its own `Options`, and
 `FormatSecret` writes a secret the way `ParseSecret` reads it.
 
 The six digits on a phone are HOTP (RFC 4226) with the counter replaced by the
@@ -51,26 +59,32 @@ One step either side by default, because clocks differ. `NoWindow` accepts only
 the current step — a distinct constant, because `0` means *the default* and a
 caller asking for no tolerance should not be handed some.
 
+At most `MaxWindow` = 10 steps either side; a wider one is refused as a
+parameter. Without that ceiling `Window: 200000` accepted half of all codes
+typed at random, and `math.MaxInt` never returned — the loop over the window
+overflowed before it could end.
+
 Every step in the window is tried and the loop does **not** stop early:
 returning as soon as one matches makes the time taken depend on *which* step it
 was. The comparison itself is constant-time — a six-digit code has a million
 values, and a server that leaks how many leading digits were right has far
 fewer.
 
-## Guessing is limited per name
+## Guessing is limited per secret
 
 A six-digit code has a million values; without a limit, trying them in order
 against one name got in after 292,211 guesses in 372 ms in an audit run.
 RFC 4226 §7.3 says the server needs to detect and stop that, and that the
 limit **MUST** hold across sessions and against parallel guessing. NIST SP
 800-63B §5.2.2 says a verifier **SHALL** limit consecutive failed attempts on
-one account to no more than 100. A `Verifier` does both:
+one account to no more than 100. A `Verifier` does both, counting per
+**credential** — per secret — and not per name:
 
 | field | default | what it does |
 | --- | --- | --- |
-| `Throttle` | `DefaultThrottle` = 5 | after this many wrong codes in a row, the name gets `ErrThrottled`… |
+| `Throttle` | `DefaultThrottle` = 5 | after this many wrong codes in a row, the secret gets `ErrThrottled`… |
 | `Pause` | `DefaultPause` = 15 min | …for this long; the code sent meanwhile is not looked at, so not even the right one passes |
-| `Lockout` | `DefaultLockout` = 100 | after this many wrong codes in a row, however spread out, the name gets `ErrLockedOut` until `Forget` |
+| `Lockout` | `DefaultLockout` = 100 | after this many wrong codes in a row, however spread out, the secret gets `ErrLockedOut` until `Forget` |
 
 RFC 4226 asks for a throttle "as low as possible, while still ensuring that
 usability is not significantly impacted" and names no number; five is more
@@ -86,9 +100,18 @@ bring a pause nearer. An accepted code starts the count again. The whole check
 is made under one lock, so guesses sent at the same moment are counted one by
 one rather than each finding the count below the limit.
 
-The memory is bounded: a name nobody has tried for a day is forgotten when the
-map has doubled since it was last swept. A locked-out name is never forgotten
-that way — that would be an unlock nobody asked for. And the limit is a lockout
+⛔ It was per name, and the name is whatever string the caller passes. A login
+form that does not canonicalise gave `dora`, `Dora`, `DORA`… sixteen counters
+for one secret: 1,600 wrong guesses where the lockout said 100. What a guesser
+attacks is the secret, so the count follows it, under every spelling. A replay
+is refused per secret too — the code accepted was the secret's, whatever name
+it was typed under. The secret is held only as its SHA-256. The name is still
+remembered beside the credential it last presented, refused or not, because
+`Forget` takes a name: `Forget("dora")` unlocks the secret `dora` last tried.
+
+The memory is bounded: a credential or a name nobody has tried for a day is
+forgotten when the maps have doubled since they were last swept. A locked-out
+credential is never forgotten that way — that would be an unlock nobody asked for. And the limit is a lockout
 someone else can trigger: whoever knows a name can lock it. That is the
 trade-off both documents accept; `Forget` is the way back, and it belongs to
 whoever can tell the person from somebody guessing.

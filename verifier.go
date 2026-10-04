@@ -3,6 +3,7 @@
 package totp
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -35,12 +36,25 @@ import (
 // guessing gets 100 tries in about five hours and then none: with the default
 // window of three steps that is a chance of 3 in 10,000 for six digits.
 //
-// The memory is per NAME, and it is this process's. Two servers behind a load
+// ⛔ The memory is per CREDENTIAL -- per secret -- not per name. It was per
+// name, and the name is whatever string the caller passes: a login form that
+// does not canonicalise gave "dora", "Dora", "DORA" ... sixteen counters for
+// one secret, and 1,600 guesses where the lockout said 100. What a guesser
+// attacks is the secret, so that is what the count follows. A replay is
+// refused per secret too, which is what RFC 6238 §5.2 asks: the code accepted
+// was the secret's, under whatever name it was typed. The secret is held only
+// as its SHA-256.
+//
+// The name is still remembered, beside the credential it last presented, for
+// one purpose: [Verifier.Forget] takes a name.
+//
+// The memory is this process's. Two servers behind a load
 // balancer each count their own guesses and neither knows about the other's;
 // a deployment that needs one answer needs a shared store, and this is the
-// interface to put one behind. A name nobody has tried for a day is
-// forgotten, so a stream of names cannot grow it for ever -- except a name
-// that is locked out, because forgetting that would be an unlock.
+// interface to put one behind. A credential nobody has tried for a day is
+// forgotten, and so is a name, so a stream of either cannot grow it for ever
+// -- except a credential that is locked out, because forgetting that would be
+// an unlock.
 //
 // The zero Verifier works, with the default options and limits.
 type Verifier struct {
@@ -56,8 +70,18 @@ type Verifier struct {
 	Lockout int
 
 	mu      sync.Mutex
-	names   map[string]*state
+	creds   map[credential]*state
+	names   map[string]alias
 	sweepAt int
+}
+
+// credential is what the state is kept under: the SHA-256 of a secret.
+type credential [sha256.Size]byte
+
+// alias is a name and the credential it last presented, for [Verifier.Forget].
+type alias struct {
+	cred credential
+	seen time.Time
 }
 
 // The defaults. RFC 4226 §7.3 asks for a throttling parameter "as low as
@@ -73,7 +97,7 @@ const (
 // idle is how long a name nobody tries is remembered.
 const idle = 24 * time.Hour
 
-// state is what is remembered about one name.
+// state is what is remembered about one credential.
 type state struct {
 	accepted bool      // whether step means anything
 	step     int64     // the last step accepted
@@ -104,10 +128,12 @@ func (v *Verifier) lockout() int {
 }
 
 // Verify checks a code for one person and refuses one that was already used,
-// and refuses to look at all while that person is throttled or locked out.
+// and refuses to look at all while that person's credential is throttled or
+// locked out.
 //
-// The name is whatever the caller calls people, and it only has to be stable:
-// it is a map key here and nothing else.
+// The name is whatever the caller calls people. It does not have to be
+// canonical: what is counted is the secret, under every spelling of the name.
+// It is what [Verifier.Forget] is later called with.
 //
 // ⛔ The whole check is made under one lock. RFC 4226 §7.3: the limit MUST
 // hold "to prevent attacks based on multiple parallel guessing techniques",
@@ -118,8 +144,12 @@ func (v *Verifier) Verify(name string, secret, code []byte) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	now := v.Options.now()
-	s := v.names[name]
+	key := credential(sha256.Sum256(secret))
+	s := v.creds[key]
 	if s != nil {
+		// Remembered even when refused: the person locked out is the one
+		// whose name Forget will be called with.
+		v.names[name] = alias{key, now}
 		if s.failures >= v.lockout() {
 			return ErrLockedOut
 		}
@@ -134,8 +164,9 @@ func (v *Verifier) Verify(name string, secret, code []byte) error {
 		return err
 	}
 	if s == nil {
-		s = v.remember(name, now)
+		s = v.remember(key, now)
 	}
+	v.names[name] = alias{key, now}
 	s.seen = now
 	if err != nil {
 		s.failures++
@@ -156,37 +187,50 @@ func (v *Verifier) Verify(name string, secret, code []byte) error {
 	return nil
 }
 
-// remember makes room for a name, forgetting idle ones when the map has
-// doubled since the last time it looked: the cost of looking is spread over
-// the names added, and the map is never more than about twice what is live.
-func (v *Verifier) remember(name string, now time.Time) *state {
-	if v.names == nil {
-		v.names = map[string]*state{}
+// remember makes room for a credential, forgetting idle ones -- and idle
+// names -- when the maps have doubled since the last time it looked: the cost
+// of looking is spread over what was added, and the maps are never more than
+// about twice what is live.
+func (v *Verifier) remember(key credential, now time.Time) *state {
+	if v.creds == nil {
+		v.creds = map[credential]*state{}
+		v.names = map[string]alias{}
 	}
-	if len(v.names) >= v.sweepAt {
+	if len(v.creds)+len(v.names) >= v.sweepAt {
 		// A step accepted at the far edge of the window is still a replay
 		// risk for two windows' worth of steps; a day covers that unless
 		// the period is enormous, and then the window decides.
 		keep := max(idle, v.pause(), time.Duration(2*v.Options.window()+2)*v.Options.period())
-		for n, s := range v.names {
+		for k, s := range v.creds {
 			if s.failures < v.lockout() && now.Sub(s.seen) > keep {
+				delete(v.creds, k)
+			}
+		}
+		for n, a := range v.names {
+			if now.Sub(a.seen) > keep {
 				delete(v.names, n)
 			}
 		}
-		v.sweepAt = max(1024, 2*len(v.names))
+		v.sweepAt = max(1024, 2*(len(v.creds)+len(v.names)))
 	}
 	s := &state{}
-	v.names[name] = s
+	v.creds[key] = s
 	return s
 }
 
-// Forget drops what is remembered about a name -- for a person removed from a
-// directory, an administrator unlocking an account after [ErrLockedOut], or a
-// test that means to start again.
+// Forget drops what is remembered about the credential a name last presented
+// -- for a person removed from a directory, an administrator unlocking an
+// account after [ErrLockedOut], or a test that means to start again.
+//
+// A name is remembered for a day after it was last tried, refused or not, so a
+// person who was locked out and tried again is found under the name they used.
 func (v *Verifier) Forget(name string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	delete(v.names, name)
+	if a, ok := v.names[name]; ok {
+		delete(v.creds, a.cred)
+		delete(v.names, name)
+	}
 }
 
 // ErrUsed is a code that was right and has already been accepted. It is

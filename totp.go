@@ -97,7 +97,8 @@ type Options struct {
 	Algorithm Algorithm
 	// Window is how many steps either side of now are accepted, for clocks
 	// that differ. 0 means 1 -- thirty seconds of slack in each direction.
-	// Use [NoWindow] to accept only the current step.
+	// Use [NoWindow] to accept only the current step. More than [MaxWindow]
+	// is refused.
 	Window int
 	// Now overrides the clock, for tests and for a server that has a better
 	// idea of the time than this process does.
@@ -108,6 +109,13 @@ type Options struct {
 // means "the default", and a caller asking for no tolerance at all should not
 // be given some.
 const NoWindow = -1
+
+// MaxWindow is the widest window accepted: ten steps either side, five
+// minutes at the default period, is a clock wronger than any that should be
+// trusted. ⛔ Without a ceiling, a window of 200,000 steps accepted half of
+// all codes typed at random, and [math.MaxInt] never returned: the loop over
+// the window overflowed before it could end.
+const MaxWindow = 10
 
 func (o Options) digits() int {
 	if o.Digits == 0 {
@@ -154,8 +162,8 @@ func (o Options) check() error {
 	if p := o.period(); p < time.Second || p%time.Second != 0 {
 		return fmt.Errorf("totp: a period of %s: it must be a whole number of seconds", p)
 	}
-	if o.window() < 0 {
-		return fmt.Errorf("totp: a window of %d steps", o.Window)
+	if w := o.window(); w < 0 || w > MaxWindow {
+		return fmt.Errorf("totp: a window of %d steps: 0 to %d are accepted", o.Window, MaxWindow)
 	}
 	return nil
 }

@@ -108,8 +108,10 @@ func TestACodeIsUsedOnce(t *testing.T) {
 		t.Errorf("the second use gave %v, want ErrUsed", err)
 	}
 	// Somebody ELSE's use of their own code is not a replay of this one: the
-	// memory is per person.
-	if err := v.Verify("eli", secret, []byte(code)); err != nil {
+	// memory is per secret.
+	elis := []byte("eli's own secret, twenty")
+	elisCode, _ := totp.At(elis, at, v.Options)
+	if err := v.Verify("eli", elis, []byte(elisCode)); err != nil {
 		t.Errorf("eli's first use was refused because dora had used hers: %v", err)
 	}
 	// ⛔ And the older code still inside the window is refused too -- it would
