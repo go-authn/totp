@@ -3,7 +3,7 @@
 // Package totp is time-based one-time passwords: RFC 6238, and the factor a
 // policy asks.
 //
-//	secret, _ := totp.ParseSecret("JBSWY3DPEHPK3PXP")
+//	secret, _ := totp.ParseSecret("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
 //	if err := totp.Verify(secret, code, totp.Options{}); err != nil { … }
 //
 // The six digits on a phone are HOTP (RFC 4226) with the counter replaced by
@@ -148,8 +148,11 @@ func (o Options) check() error {
 		// truncation stops adding digits that vary.
 		return fmt.Errorf("totp: %d digits: RFC 4226 allows 6 to 10", d)
 	}
-	if o.period() <= 0 {
-		return fmt.Errorf("totp: a period of %s", o.period())
+	// RFC 6238 counts the period X in whole seconds, and Step divides by it
+	// in seconds: anything under one second would be a division by zero, and
+	// a fraction of a second would be silently dropped.
+	if p := o.period(); p < time.Second || p%time.Second != 0 {
+		return fmt.Errorf("totp: a period of %s: it must be a whole number of seconds", p)
 	}
 	if o.window() < 0 {
 		return fmt.Errorf("totp: a window of %d steps", o.Window)
@@ -158,15 +161,18 @@ func (o Options) check() error {
 }
 
 // Step is the counter a time falls in: RFC 6238's T.
+//
+// For a period [Generate] and [Verify] refuse -- under one second -- it counts
+// in seconds rather than dividing by zero; no code is ever made from that step.
 func (o Options) Step(t time.Time) int64 {
-	return t.Unix() / int64(o.period()/time.Second)
+	return t.Unix() / max(1, int64(o.period()/time.Second))
 }
 
 // Generate produces the code for one step. It is what an authenticator does,
 // and what a test needs to produce a code a server should accept.
 func Generate(secret []byte, step int64, o Options) (string, error) {
-	if len(secret) == 0 {
-		return "", fmt.Errorf("totp: no secret")
+	if err := checkSecret(secret); err != nil {
+		return "", err
 	}
 	if err := o.check(); err != nil {
 		return "", err
@@ -181,17 +187,38 @@ func Generate(secret []byte, step int64, o Options) (string, error) {
 	// where to read four bytes, and the top bit is cleared so the number is
 	// positive in every language that has only signed integers.
 	offset := sum[len(sum)-1] & 0x0f
-	value := binary.BigEndian.Uint32(sum[offset:offset+4]) & 0x7fffffff
+	value := uint64(binary.BigEndian.Uint32(sum[offset:offset+4]) & 0x7fffffff)
 
-	mod := uint32(1)
+	// ⛔ In 64 bits: 10^10 does not fit in 32, and a uint32 modulus wraps to
+	// 1410065408 at ten digits, which gets about a third of all codes wrong.
+	mod := uint64(1)
 	for range o.digits() {
 		mod *= 10
 	}
 	return fmt.Sprintf("%0*d", o.digits(), value%mod), nil
 }
 
+// MinSecret is the shortest secret accepted, in bytes: RFC 4226 R6 says the
+// shared secret MUST be at least 128 bits, and recommends 160.
+const MinSecret = 16
+
+// checkSecret refuses a secret too short to be one. The message gives the
+// length and never the secret.
+func checkSecret(secret []byte) error {
+	if len(secret) == 0 {
+		return fmt.Errorf("totp: no secret")
+	}
+	if len(secret) < MinSecret {
+		return fmt.Errorf("totp: a secret of %d bits; RFC 4226 requires at least %d", 8*len(secret), 8*MinSecret)
+	}
+	return nil
+}
+
 // At produces the code for a time.
 func At(secret []byte, t time.Time, o Options) (string, error) {
+	if err := o.check(); err != nil {
+		return "", err
+	}
 	return Generate(secret, o.Step(t), o)
 }
 
@@ -208,8 +235,8 @@ func Verify(secret, code []byte, o Options) error {
 
 // verifyStep says WHICH step matched, which is what a replay guard needs.
 func verifyStep(secret, code []byte, o Options) (int64, error) {
-	if len(secret) == 0 {
-		return 0, fmt.Errorf("totp: no secret")
+	if err := checkSecret(secret); err != nil {
+		return 0, err
 	}
 	if err := o.check(); err != nil {
 		return 0, err

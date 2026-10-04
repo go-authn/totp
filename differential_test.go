@@ -16,12 +16,13 @@ import (
 //
 // RFC 6238's own vectors (next door) are six times, one secret per algorithm
 // and eight digits. They pin the arithmetic and leave the edges untested:
-// short secrets, secrets whose length is not a multiple of anything, six and
-// seven and nine digits, periods that are not thirty seconds, times far from
-// the ones in the table. pyotp is a widely used Python implementation, and it
-// agrees with the RFC's published table before this package is asked
-// anything -- which is what makes it usable as a judge rather than a second
-// opinion.
+// the shortest secret accepted (16 bytes, RFC 4226 R6) and secrets whose
+// length is not a multiple of anything, six, seven, nine and ten digits --
+// ten being where a 32-bit modulus wraps -- periods that are not thirty
+// seconds, times far from the ones in the table. pyotp is a widely used
+// Python implementation, and it agrees with the RFC's published table before
+// this package is asked anything -- which is what makes it usable as a judge
+// rather than a second opinion.
 //
 // It skips where pyotp is not installed. The CI lane installs it.
 func TestAgainstAnIndependentImplementation(t *testing.T) {
@@ -39,7 +40,7 @@ func TestAgainstAnIndependentImplementation(t *testing.T) {
 	for i := range 200 {
 		// Secrets of many lengths, including ones that do not divide by five
 		// and so exercise base32 padding on the way through.
-		n := 10 + i%23
+		n := totp.MinSecret + i%23
 		raw := make([]byte, n)
 		if _, err := rand.Read(raw); err != nil {
 			t.Fatal(err)
@@ -48,7 +49,7 @@ func TestAgainstAnIndependentImplementation(t *testing.T) {
 		cases = append(cases, want{
 			Secret: totp.FormatSecret(raw),
 			Unix:   int64(1000000000 + i*97531),
-			Digits: 6 + i%4,
+			Digits: 6 + i%5,
 			Period: []int{30, 60, 15, 45}[i%4],
 			Alg:    alg,
 		})
