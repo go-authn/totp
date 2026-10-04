@@ -49,7 +49,7 @@ func TestTheFactorSatisfiesAPolicy(t *testing.T) {
 // nothing to ask. A policy counts that separately, so a server can say "you
 // have no second factor" rather than "wrong code".
 func TestNobodyEnrolledIsNotARefusal(t *testing.T) {
-	f := totp.Factor("dora", nil, []byte("123456"), nil)
+	f := totp.Factor("dora", nil, []byte("123456"), &totp.Verifier{})
 	err := f.Verify(context.Background())
 	if !errors.Is(err, mfa.ErrUnavailable) {
 		t.Errorf("a person with no secret gave %v, want unavailable", err)
@@ -67,23 +67,33 @@ func TestNobodyEnrolledIsNotARefusal(t *testing.T) {
 	}
 }
 
-// Without a Verifier the factor still works -- it just cannot refuse a replay,
-// which is the whole reason a server should pass one.
-func TestAFactorWithoutAVerifier(t *testing.T) {
+// ⛔ A factor with no Verifier is refused, every time, whatever code it holds.
+// It used to fall back to the stateless check: no throttle, no lockout, no
+// replay refusal -- an audit found the code after 236,089 wrong guesses in a
+// quarter of a second, then replayed it three times. A nil Verifier is the
+// caller's mistake, reported when the factor is asked, and it is not
+// "unavailable": a policy must not pass on the other factors and hide it.
+func TestAFactorWithoutAVerifierIsRefusedForEveryCode(t *testing.T) {
 	secret := []byte("12345678901234567890")
 	code, err := totp.At(secret, time.Now(), totp.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := totp.Factor("dora", secret, []byte(code), nil)
-	if err := f.Verify(context.Background()); err != nil {
-		t.Errorf("a right code was refused: %v", err)
-	}
-	if err := f.Verify(context.Background()); err != nil {
-		t.Errorf("without a Verifier the second use should still pass: %v", err)
-	}
-	if err := totp.Factor("dora", secret, []byte("000000"), nil).Verify(context.Background()); err == nil {
-		t.Error("a wrong code was accepted")
+	for _, f := range []mfa.Factor{
+		totp.Factor("dora", secret, []byte(code), nil),
+		totp.Factor("dora", secret, []byte("000000"), nil),
+		totp.Factor("dora", nil, []byte(code), nil), // not even "nobody enrolled"
+	} {
+		err := f.Verify(context.Background())
+		if err == nil {
+			t.Fatal("a factor with no Verifier accepted a code")
+		}
+		if errors.Is(err, mfa.ErrUnavailable) {
+			t.Errorf("a missing Verifier reads as unavailable: %v", err)
+		}
+		if !strings.Contains(err.Error(), "Verifier") {
+			t.Errorf("the error does not name what is missing: %q", err)
+		}
 	}
 }
 

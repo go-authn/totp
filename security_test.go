@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"math"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -237,7 +239,7 @@ func TestBruteForceIsStopped(t *testing.T) {
 // The pause: after DefaultThrottle wrong codes in a row a name is refused --
 // even the right code, which would otherwise be an oracle -- until
 // DefaultPause has passed. Refused attempts are not counted and do not
-// extend it. Other names are not affected.
+// extend it. Other people -- other secrets -- are not affected.
 func TestAPauseAfterWrongCodes(t *testing.T) {
 	secret := []byte("12345678901234567890")
 	c := &clock{now: time.Unix(1111111109, 0)}
@@ -255,7 +257,9 @@ func TestAPauseAfterWrongCodes(t *testing.T) {
 	if errors.Is(err, totp.ErrLockedOut) {
 		t.Errorf("a pause reads as a lockout: %v", err)
 	}
-	if err := v.Verify("eli", secret, []byte(right)); err != nil {
+	elis := []byte("eli's own secret, twenty")
+	elisCode, _ := totp.At(elis, c.Now(), v.Options)
+	if err := v.Verify("eli", elis, []byte(elisCode)); err != nil {
 		t.Errorf("eli was refused because dora was paused: %v", err)
 	}
 	// Refusals during the pause neither count nor extend it.
@@ -395,9 +399,10 @@ func TestParallelGuessesAreCountedToo(t *testing.T) {
 	}
 }
 
-// The memory is bounded: a name nobody has tried for a day is forgotten, so a
-// stream of names does not grow it for ever. A name that is locked out is not
-// forgotten -- that would be an unlock nobody asked for.
+// The memory is bounded: a credential or a name nobody has tried for a day is
+// forgotten, so a stream of either does not grow it for ever. A credential
+// that is locked out is not forgotten -- that would be an unlock nobody asked
+// for.
 func TestIdleNamesAreForgotten(t *testing.T) {
 	secret := []byte("12345678901234567890")
 	c := &clock{now: time.Unix(1111111109, 0)}
@@ -408,25 +413,33 @@ func TestIdleNamesAreForgotten(t *testing.T) {
 	}
 	// Names that were let in: the memory of their last step is what refuses a
 	// replay, and once that step is a day old it refuses nothing.
-	right, _ := totp.At(secret, c.Now(), v.Options)
-	for i := range 5000 {
-		if err := v.Verify(fmt.Sprintf("old-%d", i), secret, []byte(right)); err != nil {
+	enter := func(name string) {
+		t.Helper()
+		own := []byte("the secret of " + name + "!!")
+		right, _ := totp.At(own, c.Now(), v.Options)
+		if err := v.Verify(name, own, []byte(right)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for i := range 5000 {
+		enter(fmt.Sprintf("old-%04d", i))
 	}
 	if n := v.Remembered(); n < 5000 {
-		t.Fatalf("%d names remembered right after 5001 were tried", n)
+		t.Fatalf("%d credentials remembered right after 5001 were tried", n)
 	}
 	c.Add(25 * time.Hour)
-	right, _ = totp.At(secret, c.Now(), v.Options)
 	for i := range 5000 {
-		if err := v.Verify(fmt.Sprintf("new-%d", i), secret, []byte(right)); err != nil {
-			t.Fatal(err)
-		}
+		enter(fmt.Sprintf("new-%04d", i))
 	}
 	if n := v.Remembered(); n != 5001 {
-		t.Errorf("%d names remembered, want the 5000 recent ones and the locked one", n)
+		t.Errorf("%d credentials remembered, want the 5000 recent ones and the locked one", n)
 	}
+	// The names went the same way; "locked" was tried a day ago, and the
+	// name, unlike its credential, is not kept for that.
+	if n := v.Aliases(); n != 5000 {
+		t.Errorf("%d names remembered, want the 5000 recent ones", n)
+	}
+	right, _ := totp.At(secret, c.Now(), v.Options)
 	if err := v.Verify("locked", secret, []byte(right)); !errors.Is(err, totp.ErrLockedOut) {
 		t.Errorf("the locked name, a day later, gave %v", err)
 	}
@@ -449,5 +462,79 @@ func TestASuccessStartsTheCountAgain(t *testing.T) {
 			t.Fatalf("round %d, the right code gave %v", round, err)
 		}
 		c.Add(30 * time.Second)
+	}
+}
+
+// ⛔ The lockout follows the secret, not the spelling of the name. Keyed on the
+// raw name, sixteen spellings of "dora" -- a login form that does not
+// canonicalise -- were sixteen counters, and 1,600 wrong guesses were counted
+// against one secret under a lockout of 100.
+func TestTheLockoutCountsGuessesPerSecretUnderEverySpellingOfTheName(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	v := &totp.Verifier{Options: totp.Options{Now: c.Now}}
+	total := 0
+	for mask := range 16 {
+		var b strings.Builder
+		for i, r := range "dora" {
+			if mask&(1<<i) != 0 {
+				r = r - 'a' + 'A'
+			}
+			b.WriteRune(r)
+		}
+		for {
+			c.Add(totp.DefaultPause + time.Minute) // wait out each pause
+			err := v.Verify(b.String(), secret, wrongAt(t, secret, c.Now()))
+			if errors.Is(err, totp.ErrLockedOut) {
+				break
+			}
+			if !errors.Is(err, totp.ErrWrongCode) {
+				t.Fatalf("a wrong code gave %v", err)
+			}
+			total++
+		}
+	}
+	if total != totp.DefaultLockout {
+		t.Errorf("%d wrong guesses were counted against one secret, want the lockout of %d", total, totp.DefaultLockout)
+	}
+	// Forget under any spelling that was tried unlocks the credential, and the
+	// name the person tries again with is remembered while it is refused.
+	right, _ := totp.At(secret, c.Now(), v.Options)
+	if err := v.Verify("dora", secret, []byte(right)); !errors.Is(err, totp.ErrLockedOut) {
+		t.Fatalf("the right code under the locked credential gave %v", err)
+	}
+	v.Forget("dora")
+	if err := v.Verify("DoRa", secret, []byte(right)); err != nil {
+		t.Errorf("after Forget, the right code was refused: %v", err)
+	}
+	// ⛔ And a replay is refused per secret, under any name: the code was the
+	// secret's.
+	if err := v.Verify("dora", secret, []byte(right)); !errors.Is(err, totp.ErrUsed) {
+		t.Errorf("the same code under another spelling gave %v, want ErrUsed", err)
+	}
+}
+
+// ⛔ The window has a ceiling. Without one, Window: 200000 accepted half of
+// all codes typed at random, and math.MaxInt never returned.
+func TestAWindowWiderThanMaxWindowIsRefused(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	at := time.Unix(1_700_000_000, 0)
+	for _, w := range []int{totp.MaxWindow + 1, 200000, math.MaxInt} {
+		o := totp.Options{Window: w, Now: func() time.Time { return at }}
+		err := totp.Verify(secret, []byte("000037"), o)
+		if err == nil || errors.Is(err, totp.ErrWrongCode) {
+			t.Errorf("a window of %d was not refused as a parameter: %v", w, err)
+		}
+		if _, err := totp.At(secret, at, o); err == nil {
+			t.Errorf("a window of %d made a code", w)
+		}
+	}
+	// MaxWindow itself is accepted, at both of its edges.
+	o := totp.Options{Window: totp.MaxWindow, Now: func() time.Time { return at }}
+	for _, d := range []int64{-totp.MaxWindow, totp.MaxWindow} {
+		code, _ := totp.Generate(secret, o.Step(at)+d, o)
+		if err := totp.Verify(secret, []byte(code), o); err != nil {
+			t.Errorf("the code %d steps away, inside MaxWindow, was refused: %v", d, err)
+		}
 	}
 }
