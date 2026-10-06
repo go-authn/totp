@@ -1,2 +1,2 @@
-github.com/go-authn/mfa v0.2.0 h1:2YjN7hicBE6KaOi8/7ZOiBxT7/kt4/hCyErf8EBFAv4=
-github.com/go-authn/mfa v0.2.0/go.mod h1:wPN7SA2sguNCNUjePafkN6BvO9LFc82PRR3bLwboR6I=
+github.com/go-authn/mfa v0.5.0 h1:9HkcmhBmoTIS+2yD6gvtFMPzi19tjuElEdBXXXBLwuo=
+github.com/go-authn/mfa v0.5.0/go.mod h1:gXW2ygHUIq0dbkDK5ZwtngATc2cSpTuszcin6KAqjWA=
