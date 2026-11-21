@@ -207,10 +207,7 @@ func (v *Verifier) remember(key credential, now time.Time) *state {
 // reached under endless spellings of its name grows the names map with no new
 // credential ever being remembered.
 func (v *Verifier) sweep(now time.Time) {
-	if v.creds == nil {
-		return
-	}
-	if len(v.creds)+len(v.names) >= v.sweepAt {
+	if len(v.creds)+len(v.names) >= v.sweepAt { // nil maps: nothing to range, nothing to delete
 		// A step accepted at the far edge of the window is still a replay
 		// risk for two windows' worth of steps; a day covers that unless
 		// the period is enormous, and then the window decides.
