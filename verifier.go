@@ -144,6 +144,7 @@ func (v *Verifier) Verify(name string, secret, code []byte) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	now := v.Options.now()
+	v.sweep(now) // before s is looked up: a sweep may drop an idle credential
 	key := credential(sha256.Sum256(secret))
 	s := v.creds[key]
 	if s != nil {
@@ -187,16 +188,26 @@ func (v *Verifier) Verify(name string, secret, code []byte) error {
 	return nil
 }
 
-// remember makes room for a credential, forgetting idle ones -- and idle
-// names -- when the maps have doubled since the last time it looked: the cost
-// of looking is spread over what was added, and the maps are never more than
-// about twice what is live.
+// remember adds a credential. [Verifier.sweep] forgets idle credentials -- and
+// idle names -- when the maps have doubled since the last time it looked: the
+// cost of looking is spread over what was added, and the maps are never more
+// than about twice what is live.
 func (v *Verifier) remember(key credential, now time.Time) *state {
 	if v.creds == nil {
 		v.creds = map[credential]*state{}
 		v.names = map[string]alias{}
 	}
-	if len(v.creds)+len(v.names) >= v.sweepAt {
+	s := &state{}
+	v.creds[key] = s
+	return s
+}
+
+// sweep is called before every attempt, not only when a credential is added:
+// a name is written on every attempt, locked out or not, so one credential
+// reached under endless spellings of its name grows the names map with no new
+// credential ever being remembered.
+func (v *Verifier) sweep(now time.Time) {
+	if len(v.creds)+len(v.names) >= v.sweepAt { // nil maps: nothing to range, nothing to delete
 		// A step accepted at the far edge of the window is still a replay
 		// risk for two windows' worth of steps; a day covers that unless
 		// the period is enormous, and then the window decides.
@@ -213,9 +224,6 @@ func (v *Verifier) remember(key credential, now time.Time) *state {
 		}
 		v.sweepAt = max(1024, 2*(len(v.creds)+len(v.names)))
 	}
-	s := &state{}
-	v.creds[key] = s
-	return s
 }
 
 // Forget drops what is remembered about the credential a name last presented
